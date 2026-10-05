@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a1a">
+<title>Archery Clock</title>
+<style>
+  :root { --bg:#1a1a1a; --fg:#ffffff; --btn:rgba(255,255,255,.14); --btn-hi:rgba(255,255,255,.26); }
+  * { box-sizing:border-box; }
+  html, body {
+    margin:0; height:100%;
+    background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;
+    transition:background-color .25s, color .25s;
+    overflow:hidden;
+  }
+  body { display:flex; flex-direction:column;
+         padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+
+  body.prep   { --bg:#c62828; }
+  body.green  { --bg:#1e9e4a; }
+  body.yellow { --bg:#f5c400; --fg:#111; --btn:rgba(0,0,0,.12); --btn-hi:rgba(0,0,0,.22); }
+  body.done   { --bg:#c62828; }
+
+  main { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:0; padding:8px 16px; }
+  #phase { font-size:clamp(16px,4vw,30px); font-weight:600; letter-spacing:.18em; text-transform:uppercase; opacity:.85; min-height:1.3em; }
+  #time {
+    font-size:min(52vw,58vh); font-weight:800; line-height:1;
+    font-variant-numeric:tabular-nums; letter-spacing:-.03em;
+  }
+  #unit { font-size:clamp(14px,3vw,22px); opacity:.7; margin-top:4px; }
+
+  .controls { display:grid; grid-template-columns:1fr 1.6fr 1fr; gap:12px; padding:12px 16px 8px; }
+  button {
+    font:inherit; color:var(--fg); background:var(--btn);
+    border:0; border-radius:18px; cursor:pointer;
+    font-size:clamp(22px,6vw,40px); font-weight:700;
+    padding:18px 8px; min-height:76px;
+    transition:background .15s, opacity .15s, transform .05s;
+  }
+  button:active { transform:scale(.97); background:var(--btn-hi); }
+  button:disabled { opacity:.3; cursor:default; transform:none; }
+  #go { background:#ffffff; color:#111; }
+  body.prep #go, body.green #go, body.yellow #go { background:#111; color:#fff; }
+
+  .bar { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:4px 16px 12px; font-size:13px; opacity:.75; }
+  .bar button { font-size:13px; font-weight:600; min-height:0; padding:8px 12px; border-radius:10px; }
+  #wl::before { content:"●"; margin-right:6px; }
+  #wl.on::before { color:#7CFC8A; }
+  body.yellow #wl.on::before { color:#0a6b2a; }
+  #wl.off::before { color:#ff8a80; }
+</style>
+</head>
+<body class="idle">
+  <main>
+    <div id="phase">Ready</div>
+    <div id="time">120</div>
+    <div id="unit">seconds</div>
+  </main>
+
+  <div class="controls">
+    <button id="minus" aria-label="Minus 10 seconds">−10</button>
+    <button id="go">GO</button>
+    <button id="plus" aria-label="Plus 10 seconds">+10</button>
+  </div>
+
+  <div class="bar">
+    <span id="wl" class="off">Screen sleep: tap GO to keep awake</span>
+    <button id="fs" hidden>Fullscreen</button>
+  </div>
+
+<script>
+(() => {
+  const PREP_SECONDS = 10, STEP = 10, MIN = 10, MAX = 990, YELLOW_AT = 30;
+
+  const $ = id => document.getElementById(id);
+  const timeEl = $('time'), phaseEl = $('phase'), goBtn = $('go'),
+        plusBtn = $('plus'), minusBtn = $('minus'), wlEl = $('wl'), fsBtn = $('fs');
+
+  let setSeconds = 120;
+  try { const s = parseInt(localStorage.getItem('archeryClockSet'), 10); if (s >= MIN && s <= MAX) setSeconds = s; } catch (e) {}
+
+  let phase = 'idle';          // idle | prep | green | yellow | done
+  let prepEnd = 0, shootEnd = 0, timer = null;
+
+  /* ---------- Horn (Web Audio, no files needed) ---------- */
+  let ctx = null;
+  function audio() {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function honk(t, dur) {
+    const c = ctx;
+    const out = c.createGain();
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 2400; lp.Q.value = 0.7;
+    out.gain.setValueAtTime(0.0001, t);
+    out.gain.exponentialRampToValueAtTime(0.5, t + 0.03);
+    out.gain.setValueAtTime(0.5, t + dur - 0.06);
+    out.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    lp.connect(out); out.connect(c.destination);
+    [349, 440, 523].forEach((f, i) => {           // a chord sounds more like a real horn
+      const o = c.createOscillator();
+      o.type = i === 0 ? 'sawtooth' : 'square';
+      o.frequency.value = f;
+      const g = c.createGain(); g.gain.value = i === 0 ? 0.5 : 0.18;
+      o.connect(g); g.connect(lp);
+      o.start(t); o.stop(t + dur + 0.02);
+    });
+  }
+  function honks(n) {
+    if (!ctx) return;
+    const start = ctx.currentTime + 0.05, dur = 0.55, gap = 0.3;
+    for (let i = 0; i < n; i++) honk(start + i * (dur + gap), dur);
+  }
+
+  /* ---------- Keep the screen awake ---------- */
+  let lock = null;
+  async function keepAwake() {
+    if (!('wakeLock' in navigator)) {
+      wlEl.className = 'off';
+      wlEl.textContent = 'Screen lock not supported – set auto-lock to Never';
+      return;
+    }
+    if (lock) return;
+    try {
+      lock = await navigator.wakeLock.request('screen');
+      wlEl.className = 'on'; wlEl.textContent = 'Screen kept awake';
+      lock.addEventListener('release', () => {
+        lock = null;
+        wlEl.className = 'off'; wlEl.textContent = 'Screen may sleep – tap to re-enable';
+      });
+    } catch (e) {
+      wlEl.className = 'off'; wlEl.textContent = 'Screen may sleep – tap to re-enable';
+    }
+  }
+  // The browser drops the lock when you switch apps/tabs – grab it again on return.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wlEl.className === 'off' && ctx) keepAwake();
+  });
+  wlEl.addEventListener('click', keepAwake);
+
+  /* ---------- Fullscreen (Android / desktop; iPhone uses Add to Home Screen) ---------- */
+  const fsReq = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+  if (fsReq) {
+    fsBtn.hidden = false;
+    fsBtn.onclick = () => {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else fsReq.call(document.documentElement);
+    };
+  }
+
+  /* ---------- Clock ---------- */
+  function render(seconds) {
+    timeEl.textContent = Math.max(0, seconds);
+    document.body.className = phase;
+    const running = phase === 'prep' || phase === 'green' || phase === 'yellow';
+    goBtn.textContent = running ? 'STOP' : 'GO';
+    plusBtn.disabled = running || setSeconds >= MAX;
+    minusBtn.disabled = running || setSeconds <= MIN;
+    phaseEl.textContent = { idle:'Ready', prep:'Get ready', green:'Shoot', yellow:'Shoot', done:'Time' }[phase];
+  }
+
+  function tick() {
+    const now = performance.now();
+    if (phase === 'prep') {
+      if (now >= prepEnd) {
+        phase = setSeconds <= YELLOW_AT ? 'yellow' : 'green';
+        honks(1);
+      } else return render(Math.ceil((prepEnd - now) / 1000));
+    }
+    if (phase === 'green' || phase === 'yellow') {
+      const left = Math.ceil((shootEnd - now) / 1000);
+      if (now >= shootEnd) {
+        phase = 'done';
+        clearInterval(timer); timer = null;
+        honks(3);
+        return render(0);
+      }
+      if (phase === 'green' && left <= YELLOW_AT) phase = 'yellow';
+      render(left);
+    }
+  }
+
+  function start() {
+    audio(); keepAwake();
+    honks(2);
+    const now = performance.now();
+    prepEnd = now + PREP_SECONDS * 1000;
+    shootEnd = prepEnd + setSeconds * 1000;   // fixed end times = no drift
+    phase = 'prep';
+    render(PREP_SECONDS);
+    clearInterval(timer);
+    timer = setInterval(tick, 50);
+  }
+
+  function stop() {
+    clearInterval(timer); timer = null;
+    phase = 'idle';
+    render(setSeconds);
+  }
+
+  function adjust(d) {
+    if (phase !== 'idle' && phase !== 'done') return;
+    setSeconds = Math.min(MAX, Math.max(MIN, setSeconds + d));
+    try { localStorage.setItem('archeryClockSet', setSeconds); } catch (e) {}
+    phase = 'idle';
+    render(setSeconds);
+  }
+
+  goBtn.onclick = () => (phase === 'prep' || phase === 'green' || phase === 'yellow') ? stop() : start();
+  plusBtn.onclick = () => adjust(STEP);
+  minusBtn.onclick = () => adjust(-STEP);
+
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); goBtn.click(); }
+    else if (e.code === 'ArrowUp' || e.key === '+' || e.key === '=') adjust(STEP);
+    else if (e.code === 'ArrowDown' || e.key === '-') adjust(-STEP);
+  });
+
+  render(setSeconds);
+})();
+</script>
+</body>
+</html>
