@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a1a">
+<title>Archery Clock</title>
+<style>
+  :root { --bg:#1a1a1a; --fg:#ffffff; --btn:rgba(255,255,255,.14); --btn-hi:rgba(255,255,255,.26); }
+  * { box-sizing:border-box; }
+  html, body {
+    margin:0; height:100%;
+    background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    touch-action:manipulation;
+    transition:background-color .25s, color .25s;
+    overflow:hidden;
+  }
+  body { display:flex; flex-direction:column;
+         padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+
+  body.prep   { --bg:#c62828; }
+  body.green  { --bg:#1e9e4a; }
+  body.yellow { --bg:#f5c400; --fg:#111; --btn:rgba(0,0,0,.12); --btn-hi:rgba(0,0,0,.22); }
+  body.opp    { --bg:#1565c0; }
+  body.done   { --bg:#c62828; }
+
+  /* mode selector */
+  .modes { display:flex; gap:8px; padding:10px 14px 2px; justify-content:center; }
+  .modes button {
+    flex:1; max-width:180px;
+    font:inherit; font-size:clamp(13px,3.4vw,16px); font-weight:600;
+    color:var(--fg); background:var(--btn); border:0; border-radius:12px;
+    padding:10px 6px; cursor:pointer; opacity:.6;
+    transition:opacity .15s, background .15s;
+  }
+  .modes button.active { opacity:1; background:var(--btn-hi); }
+  .modes button:active { transform:scale(.97); }
+
+  main { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:0; padding:4px 16px; }
+  #phase { font-size:clamp(16px,4vw,30px); font-weight:600; letter-spacing:.18em; text-transform:uppercase; opacity:.85; min-height:1.3em; text-align:center; }
+  #time {
+    font-size:min(50vw,52vh); font-weight:800; line-height:1;
+    font-variant-numeric:tabular-nums; letter-spacing:-.03em;
+  }
+  #unit { font-size:clamp(13px,3vw,20px); opacity:.72; margin-top:4px; text-align:center; min-height:1.3em; }
+
+  .controls { display:grid; grid-template-columns:1fr 1.6fr 1fr; gap:12px; padding:12px 16px 8px; }
+  button.ctl {
+    font:inherit; color:var(--fg); background:var(--btn);
+    border:0; border-radius:18px; cursor:pointer;
+    font-size:clamp(22px,6vw,40px); font-weight:700;
+    padding:18px 8px; min-height:76px;
+    transition:background .15s, opacity .15s, transform .05s;
+  }
+  button.ctl:active { transform:scale(.97); background:var(--btn-hi); }
+  button.ctl:disabled { opacity:.3; cursor:default; transform:none; }
+  button.ctl.sel { background:var(--btn-hi); outline:3px solid var(--fg); outline-offset:-3px; }
+  #go { background:#ffffff; color:#111; }
+  body.prep #go, body.green #go, body.yellow #go, body.opp #go { background:#111; color:#fff; }
+
+  .bar { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:4px 16px 12px; font-size:13px; opacity:.75; }
+  .bar button { font-size:13px; font-weight:600; min-height:0; padding:8px 12px; border-radius:10px; color:var(--fg); background:var(--btn); border:0; }
+  #wl::before { content:"●"; margin-right:6px; }
+  #wl.on::before { color:#7CFC8A; }
+  body.yellow #wl.on::before { color:#0a6b2a; }
+  #wl.off::before { color:#ff8a80; }
+</style>
+</head>
+<body class="idle">
+  <div class="modes">
+    <button data-mode="practice">Practice</button>
+    <button data-mode="team">Team final</button>
+    <button data-mode="individual">Ind. final</button>
+  </div>
+
+  <main>
+    <div id="phase">Ready</div>
+    <div id="time">120</div>
+    <div id="unit">seconds</div>
+  </main>
+
+  <div class="controls">
+    <button id="minus" class="ctl" aria-label="Minus / left">−10</button>
+    <button id="go" class="ctl">GO</button>
+    <button id="plus" class="ctl" aria-label="Plus / right">+10</button>
+  </div>
+
+  <div class="bar">
+    <span id="wl" class="off">Screen sleep: tap GO to keep awake</span>
+    <button id="fs" hidden>Fullscreen</button>
+  </div>
+
+<script>
+(() => {
+  const PREP = 10, STEP = 10, MIN = 10, MAX = 990, PRACTICE_YELLOW = 30;
+  const TEAM_TIMES = [80, 120];
+  const OPP_TEAM = { 80: 37, 120: 57 };
+  const TEAM_YELLOW = 30;
+  const INDIV_YOU = 20, INDIV_OPP = 15, INDIV_ARROWS = 3, INDIV_YELLOW = 10;
+
+  const $ = id => document.getElementById(id);
+  const timeEl = $('time'), phaseEl = $('phase'), unitEl = $('unit'),
+        goBtn = $('go'), leftBtn = $('minus'), rightBtn = $('plus'),
+        wlEl = $('wl'), fsBtn = $('fs'),
+        modeBtns = Array.from(document.querySelectorAll('.modes button'));
+
+  /* ---------- persisted settings ---------- */
+  let mode = 'practice';
+  let practiceSeconds = 120, teamSeconds = 120;
+  try { const m = localStorage.getItem('archeryMode'); if (['practice','team','individual'].includes(m)) mode = m; } catch (e) {}
+  try { const s = parseInt(localStorage.getItem('archeryClockSet'), 10); if (s >= MIN && s <= MAX) practiceSeconds = s; } catch (e) {}
+  try { const t = parseInt(localStorage.getItem('archeryTeamSet'), 10); if (TEAM_TIMES.includes(t)) teamSeconds = t; } catch (e) {}
+
+  /* ---------- runtime state ---------- */
+  let phase = 'idle';          // idle | prep | green | yellow | opp | done
+  let timer = null;
+  // practice timing (fixed end timestamps = no drift)
+  let prepEnd = 0, shootEnd = 0;
+  // simulation
+  let segs = [], segIndex = 0, segEnd = 0, carry = 0, curSeg = null;
+
+  const isRunning = () => phase === 'prep' || phase === 'green' || phase === 'yellow' || phase === 'opp';
+
+  /* ---------- Horn (Web Audio, no files needed) ---------- */
+  let ctx = null;
+  function audio() {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function honk(t, dur) {
+    const c = ctx;
+    const out = c.createGain();
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 2400; lp.Q.value = 0.7;
+    out.gain.setValueAtTime(0.0001, t);
+    out.gain.exponentialRampToValueAtTime(0.5, t + 0.03);
+    out.gain.setValueAtTime(0.5, t + dur - 0.06);
+    out.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    lp.connect(out); out.connect(c.destination);
+    [349, 440, 523].forEach((f, i) => {
+      const o = c.createOscillator();
+      o.type = i === 0 ? 'sawtooth' : 'square';
+      o.frequency.value = f;
+      const g = c.createGain(); g.gain.value = i === 0 ? 0.5 : 0.18;
+      o.connect(g); g.connect(lp);
+      o.start(t); o.stop(t + dur + 0.02);
+    });
+  }
+  function honks(n) {
+    if (!ctx) return;
+    const start = ctx.currentTime + 0.05, dur = 0.55, gap = 0.3;
+    for (let i = 0; i < n; i++) honk(start + i * (dur + gap), dur);
+  }
+
+  /* ---------- Keep the screen awake ---------- */
+  let lock = null;
+  async function keepAwake() {
+    if (!('wakeLock' in navigator)) {
+      wlEl.className = 'off';
+      wlEl.textContent = 'Screen lock not supported – set auto-lock to Never';
+      return;
+    }
+    if (lock) return;
+    try {
+      lock = await navigator.wakeLock.request('screen');
+      wlEl.className = 'on'; wlEl.textContent = 'Screen kept awake';
+      lock.addEventListener('release', () => {
+        lock = null;
+        wlEl.className = 'off'; wlEl.textContent = 'Screen may sleep – tap to re-enable';
+      });
+    } catch (e) {
+      wlEl.className = 'off'; wlEl.textContent = 'Screen may sleep – tap to re-enable';
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wlEl.className === 'off' && ctx) keepAwake();
+  });
+  wlEl.addEventListener('click', keepAwake);
+
+  /* ---------- Fullscreen ---------- */
+  const fsReq = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
+  if (fsReq) {
+    fsBtn.hidden = false;
+    fsBtn.onclick = () => {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      } else fsReq.call(document.documentElement);
+    };
+  }
+
+  /* ---------- Rendering ---------- */
+  function setBtn(btn, text, disabled, hidden) {
+    btn.textContent = text;
+    btn.disabled = !!disabled;
+    btn.style.visibility = hidden ? 'hidden' : 'visible';
+  }
+
+  function labels() {
+    if (phase === 'idle') {
+      phaseEl.textContent = 'Ready';
+      unitEl.textContent =
+        mode === 'practice' ? 'seconds' :
+        mode === 'team'     ? 'Team · ' + teamSeconds + 's you / ' + OPP_TEAM[teamSeconds] + 's opponent' :
+                              'Individual · 20s you / 15s opp × 3 arrows';
+    } else if (phase === 'prep') {
+      phaseEl.textContent = 'Get ready';
+      unitEl.textContent = 'seconds';
+    } else if (phase === 'opp') {
+      phaseEl.textContent = 'Opponent';
+      unitEl.textContent = curSeg ? curSeg.unit : '';
+    } else if (phase === 'done') {
+      phaseEl.textContent = 'Time';
+      unitEl.textContent = '';
+    } else { // green / yellow
+      phaseEl.textContent = 'Shoot';
+      unitEl.textContent = curSeg ? curSeg.unit : 'seconds';
+    }
+  }
+
+  function updateControls() {
+    modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    leftBtn.classList.remove('sel'); rightBtn.classList.remove('sel');
+    const running = isRunning();
+
+    if (mode === 'practice') {
+      setBtn(goBtn, running ? 'STOP' : 'GO', false, false);
+      setBtn(leftBtn,  '−10', running || practiceSeconds <= MIN, false);
+      setBtn(rightBtn, '+10',      running || practiceSeconds >= MAX, false);
+    } else if (running) {                 // team or individual, mid-round
+      setBtn(goBtn, 'NEXT', false, false);
+      setBtn(leftBtn, 'RESET', false, false);
+      setBtn(rightBtn, '', true, true);
+    } else if (mode === 'team') {
+      setBtn(goBtn, 'START', false, false);
+      setBtn(leftBtn, '80', false, false);
+      setBtn(rightBtn, '120', false, false);
+      (teamSeconds === 80 ? leftBtn : rightBtn).classList.add('sel');
+    } else {                              // individual idle
+      setBtn(goBtn, 'START', false, false);
+      setBtn(leftBtn, '—', true, false);
+      setBtn(rightBtn, '—', true, false);
+    }
+  }
+
+  function render(seconds) {
+    timeEl.textContent = Math.max(0, seconds);
+    document.body.className = phase;
+    labels();
+    updateControls();
+  }
+
+  function renderIdle() {
+    phase = 'idle'; curSeg = null;
+    const n = mode === 'practice' ? practiceSeconds : mode === 'team' ? teamSeconds : INDIV_YOU;
+    render(n);
+  }
+
+  /* ---------- Practice mode ---------- */
+  function practiceStart() {
+    audio(); keepAwake(); honks(2);
+    const now = performance.now();
+    prepEnd = now + PREP * 1000;
+    shootEnd = prepEnd + practiceSeconds * 1000;
+    phase = 'prep';
+    render(PREP);
+    clearInterval(timer); timer = setInterval(practiceTick, 50);
+  }
+  function practiceTick() {
+    const now = performance.now();
+    if (phase === 'prep') {
+      if (now >= prepEnd) { phase = practiceSeconds <= PRACTICE_YELLOW ? 'yellow' : 'green'; honks(1); }
+      else return render(Math.ceil((prepEnd - now) / 1000));
+    }
+    if (phase === 'green' || phase === 'yellow') {
+      const left = Math.ceil((shootEnd - now) / 1000);
+      if (now >= shootEnd) { phase = 'done'; clearInterval(timer); timer = null; honks(3); return render(0); }
+      if (phase === 'green' && left <= PRACTICE_YELLOW) phase = 'yellow';
+      render(left);
+    }
+  }
+
+  /* ---------- Finals simulation ---------- */
+  function buildTeam() {
+    segs = [
+      { kind: 'prep', secs: PREP },
+      { kind: 'you', secs: teamSeconds, yellow: TEAM_YELLOW, budget: true, unit: 'Your time' },
+      { kind: 'opp', secs: OPP_TEAM[teamSeconds], unit: 'Opponent shooting' },
+      { kind: 'you', secs: 0, yellow: TEAM_YELLOW, resume: true, unit: 'Time remaining' }
+    ];
+  }
+  function buildIndividual() {
+    segs = [{ kind: 'prep', secs: PREP }];
+    for (let a = 1; a <= INDIV_ARROWS; a++) {
+      segs.push({ kind: 'you', secs: INDIV_YOU, yellow: INDIV_YELLOW, unit: 'Arrow ' + a + ' of ' + INDIV_ARROWS });
+      segs.push({ kind: 'opp', secs: INDIV_OPP, unit: 'Opponent — arrow ' + a + ' of ' + INDIV_ARROWS });
+    }
+  }
+
+  const colorFor = (s, left) => (left <= s.yellow ? 'yellow' : 'green');
+
+  function startSim() {
+    audio(); keepAwake();
+    (mode === 'team') ? buildTeam() : buildIndividual();
+    carry = 0;
+    enterSeg(0);
+    clearInterval(timer); timer = setInterval(simTick, 50);
+  }
+
+  function enterSeg(i) {
+    segIndex = i;
+    const s = segs[i];
+    curSeg = s;
+    if (s.resume) s.secs = carry;               // team: pick up leftover team time
+
+    if (s.kind === 'prep') honks(2);
+    else if (s.kind === 'opp') honks(1);
+    else if (s.kind === 'you' && s.secs > 0) honks(1);
+
+    if (s.secs <= 0) { advance(); return; }      // e.g. no team time left to resume
+
+    phase = s.kind === 'prep' ? 'prep' : s.kind === 'opp' ? 'opp' : colorFor(s, s.secs);
+    segEnd = performance.now() + s.secs * 1000;
+    render(s.secs);
+  }
+
+  function simTick() {
+    const now = performance.now();
+    const s = curSeg;
+    if (!s) return;
+    if (now >= segEnd) { leaveSeg(true); return; }
+    const left = Math.ceil((segEnd - now) / 1000);
+    if (s.kind === 'you') phase = colorFor(s, left);
+    render(left);
+  }
+
+  function leaveSeg(expired) {
+    const s = curSeg;
+    if (s && s.budget && !s.resume) {           // team first turn: bank unused team time
+      carry = expired ? 0 : Math.max(0, Math.ceil((segEnd - performance.now()) / 1000));
+    }
+    advance();
+  }
+
+  function advance() {
+    if (segIndex < segs.length - 1) enterSeg(segIndex + 1);
+    else finishSim();
+  }
+
+  function finishSim() {
+    clearInterval(timer); timer = null;
+    phase = 'done'; curSeg = null;
+    honks(3);
+    render(0);
+  }
+
+  function stopAll() { clearInterval(timer); timer = null; }
+
+  /* ---------- Settings adjust ---------- */
+  function practiceAdjust(d) {
+    if (isRunning()) return;
+    practiceSeconds = Math.min(MAX, Math.max(MIN, practiceSeconds + d));
+    try { localStorage.setItem('archeryClockSet', practiceSeconds); } catch (e) {}
+    renderIdle();
+  }
+  function setTeam(v) {
+    teamSeconds = v;
+    try { localStorage.setItem('archeryTeamSet', v); } catch (e) {}
+    renderIdle();
+  }
+
+  /* ---------- Button wiring ---------- */
+  goBtn.onclick = () => {
+    if (mode === 'practice') { isRunning() ? (stopAll(), renderIdle()) : practiceStart(); }
+    else if (isRunning()) { leaveSeg(false); }   // NEXT: advance early
+    else { startSim(); }
+  };
+
+  leftBtn.onclick = () => {
+    if (isRunning()) {                 // RESET during a sim round
+      if (mode !== 'practice') { stopAll(); renderIdle(); }
+      return;
+    }
+    if (mode === 'practice') practiceAdjust(-STEP);
+    else if (mode === 'team') setTeam(80);
+  };
+
+  rightBtn.onclick = () => {
+    if (isRunning()) return;
+    if (mode === 'practice') practiceAdjust(STEP);
+    else if (mode === 'team') setTeam(120);
+  };
+
+  modeBtns.forEach(b => b.onclick = () => {
+    stopAll();
+    mode = b.dataset.mode;
+    try { localStorage.setItem('archeryMode', mode); } catch (e) {}
+    renderIdle();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); goBtn.click(); }
+    else if ((e.code === 'ArrowUp' || e.key === '+' || e.key === '=') && mode === 'practice') practiceAdjust(STEP);
+    else if ((e.code === 'ArrowDown' || e.key === '-') && mode === 'practice') practiceAdjust(-STEP);
+  });
+
+  renderIdle();
+})();
+</script>
+</body>
+</html>
